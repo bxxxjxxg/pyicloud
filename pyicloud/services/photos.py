@@ -1,9 +1,12 @@
+import os
 import sys
 import json
+import time
 import logging
 import base64
 
 from datetime import datetime
+from tzlocal import get_localzone
 from pyicloud.exceptions import PyiCloudServiceNotActivatedErrror
 import pytz
 
@@ -418,6 +421,9 @@ class PhotoAsset(object):
         self._master_record = master_record
         self._asset_record = asset_record
 
+        self._is_live_photo = (
+            'resOriginalVidComplRes' in self._master_record['fields']
+        )
         self._versions = None
 
     ITEM_TYPES = {
@@ -425,6 +431,13 @@ class PhotoAsset(object):
         u"public.jpeg": u"image",
         u"public.png": u"image",
         u"com.apple.quicktime-movie": u"movie"
+    }
+
+    LIVE_PHOTO_VERSION_LOOKUP = {
+        u"original": u"resOriginal",
+        u"medium": u"resJPEGMed",
+        u"thumb": u"resJPEGThumb",
+        u"comp": u"resOriginalVidCompl"
     }
 
     PHOTO_VERSION_LOOKUP = {
@@ -492,7 +505,9 @@ class PhotoAsset(object):
     def versions(self):
         if not self._versions:
             self._versions = {}
-            if self.item_type == "movie":
+            if self._is_live_photo:
+                typed_version_lookup = self.LIVE_PHOTO_VERSION_LOOKUP
+            elif self.item_type == "movie":
                 typed_version_lookup = self.VIDEO_VERSION_LOOKUP
             else:
                 typed_version_lookup = self.PHOTO_VERSION_LOOKUP
@@ -541,6 +556,52 @@ class PhotoAsset(object):
             stream=True,
             **kwargs
         )
+
+    def download_comp(self, **kwargs):
+        # live photo mov file
+        if 'comp' not in self.versions:
+            return None
+
+        return self._service.session.get(
+            self.versions['comp']['url'],
+            stream=True,
+            **kwargs
+        )
+
+    def update_mtime(self, download_path):
+        if self.created:
+            created_date = None
+            try:
+                created_date = self.created.astimezone(get_localzone())
+            except (ValueError, OSError):
+                return
+            ctime = time.mktime(created_date.timetuple())
+            os.utime(download_path, (ctime, ctime))
+
+    def save(self, dest_dir='.'):
+        photo_response = self.download()
+        if not photo_response:
+            return 0
+
+        filepath = os.path.join(dest_dir, self.filename)
+        data = photo_response.raw.read()
+        with open(filepath, "wb") as file_obj:
+            file_obj.write(data)
+        self.update_mtime(filepath)
+        return len(data)
+
+    def save_comp(self, dest_dir='.'):
+        comp_response = self.download_comp()
+        if not comp_response:
+            return 0
+
+        filename = os.path.splitext(self.filename)[0] + ".MOV"
+        filepath = os.path.join(dest_dir, filename)
+        data = comp_response.raw.read()
+        with open(filepath, "wb") as file_obj:
+            file_obj.write(data)
+        self.update_mtime(filepath)
+        return len(data)
 
     def __repr__(self):
         return "<%s: id=%s>" % (
